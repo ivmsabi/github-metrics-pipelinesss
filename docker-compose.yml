@@ -1,0 +1,141 @@
+# ~/datalens-project/datalens/docker-compose.yml
+version: '3.8'
+
+services:
+  # === DataLens Core Services ===
+  pg-us:
+    image: postgres:13
+    container_name: datalens-pg-us
+    environment:
+      POSTGRES_DB: us-db
+      POSTGRES_USER: us
+      POSTGRES_PASSWORD: us
+    volumes:
+      - us-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  pg-compeng:
+    image: postgres:13
+    container_name: datalens-pg-compeng
+    environment:
+      POSTGRES_DB: compeng-db
+      POSTGRES_USER: compeng
+      POSTGRES_PASSWORD: compeng
+    volumes:
+      - compeng-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  us:
+    image: ghcr.io/datalens-tech/datalens-us:latest
+    container_name: datalens-us
+    depends_on:
+      - pg-us
+    environment:
+      POSTGRES_DSN_LIST: postgres://us:us@pg-us:5432/us-db
+      AUTH_POLICY: disabled
+      MASTER_TOKEN: master_token
+    restart: unless-stopped
+
+  control-api:
+    image: ghcr.io/datalens-tech/datalens-control-api:latest
+    container_name: datalens-control-api
+    depends_on:
+      - us
+      - compeng
+    environment:
+      US_HOST: http://us:8080
+      BI_API_UWSGI_WORKERS_COUNT: 4
+      CONNECTOR_AVAILABILITY_VISIBLE: "clickhouse,postgres"
+      MASTER_TOKEN: master_token
+    restart: unless-stopped
+
+  data-api:
+    image: ghcr.io/datalens-tech/datalens-data-api:latest
+    container_name: datalens-data-api
+    depends_on:
+      - us
+      - compeng
+    environment:
+      US_HOST: http://us:8080
+      CACHES_REDIS_URI: redis://redis:6379/0
+      RQE_SECRET_KEY: rqe_secret_key
+      MASTER_TOKEN: master_token
+    restart: unless-stopped
+
+  ui:
+    image: ghcr.io/datalens-tech/datalens-ui:latest
+    container_name: datalens-ui
+    depends_on:
+      - us
+      - control-api
+      - data-api
+    environment:
+      APP_ENV: production
+      APP_INSTALLATION: "opensource"
+      AUTH_POLICY: disabled
+      US_ENDPOINT: http://us:8080
+      BI_API_ENDPOINT: http://control-api:8080
+      BI_DATA_ENDPOINT: http://data-api:8080
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: datalens-redis
+    restart: unless-stopped
+
+  # === Твой ClickHouse (уже есть данные!) ===
+  clickhouse:
+    image: clickhouse/clickhouse-server:23.8
+    container_name: clickhouse
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - ./clickhouse_data:/var/lib/clickhouse
+    environment:
+      CLICKHOUSE_DB: github_metrics
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    # Добавляем кастомный конфиг
+    configs:
+      - source: clickhouse_config
+        target: /etc/clickhouse-server/config.d/listen.xml
+    restart: unless-stopped
+
+  # === Airflow (твой существующий) ===
+  postgres_airflow:
+    image: postgres:13
+    container_name: postgres_airflow
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - ./postgres_airflow_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  airflow:
+    image: apache/airflow:2.7.1
+    container_name: airflow
+    depends_on:
+      - postgres_airflow
+      - clickhouse
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres_airflow/airflow
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./scripts:/opt/airflow/scripts
+      - ./.env:/opt/airflow/.env
+    ports:
+      - "8081:8080"
+    command: bash -c "airflow db init && airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com && airflow webserver & airflow scheduler"
+    restart: unless-stopped
+
+volumes:
+  us-data:
+  compeng-data:

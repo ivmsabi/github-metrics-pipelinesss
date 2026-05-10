@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.env
+venv/
+clickhouse_data/
+postgres_data/
+last_run.txt
+.DS_Store
